@@ -1,0 +1,534 @@
+---
+title: "Script 5: Data Visualization"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+  
+  knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+Load the necessary libraries
+
+```{r set_paths, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+
+  library(tmap)
+  library(magrittr)
+  library(dplyr)
+  library(ggplot2)
+
+  source(file.path(getwd(), 'functions', "abb_Functions.R"))
+
+```
+
+Next we load the data objects that we built earlier.
+
+```{r load_data, message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=FALSE, results='hide'}
+  load(file.path(getwd(), 'data', 'prepared', 'prepared_data.RData'))
+
+  load(file.path(getwd(), 'data', 'analyzed', 'analyzed_data.RData'))
+
+  dir.create(file.path(getwd(), 'images'))
+
+  str_col = col_df$rgb[1]
+    
+```
+
+### Host type investigation
+
+We look at host behavior, in aiming to identify cases the profit maximizing hosts. 
+
+```{r host_types}
+
+  str.col <- col_df$rgb[1]
+
+  ## Create table of host block frequencies
+
+  host.block.freq <- ggplot(str_tdf_all, aes(x=block_rate)) +
+     geom_density(fill=str.col, color=str.col) +
+     ylab('Frequency\n') +
+     xlab('\n\n% of Time Property is Blocked') +
+     scale_x_continuous(breaks=seq(0,1,.2),
+                        labels=c('0%', '20%', '40%', '60%', '80%', '100%')) +
+     #ggtitle('Host Block Rate Frequency\n') +
+     theme(plot.title = element_text(hjust = 0.5, size = 10)) +
+     theme(axis.text.y=element_blank(),
+           axis.ticks.y=element_blank(),
+           plot.caption=element_text(size=6, hjust=0)) + 
+     labs(caption = paste0('\nDensity plot of frequency of blocking schedule for short term ',
+                           '\nleasing observations. Blocking indicates that the property ',
+                           'is \nnot available for nightly rental on Airbnb. Vertical lines',
+                           '\ndelineate the three host type groupings.'),
+          title = 'Host Blocking Frequency\n') +
+    geom_vline(xintercept = .25, linetype="dashed", color = "black", size=.5, alpha=.5)+
+    geom_vline(xintercept = .75, linetype="dashed", color = "black", size=.5, alpha=.5)
+    
+  
+  block.rate.period <- ggplot(str_tdf_all, 
+                              aes(x=block_rate, y=nbr_block * (366/total_days))) +
+    geom_point(fill=alpha(str.col,.3), color=alpha(str.col,.3), size=.1, shape=16) +
+    ylab('Nbr of Blocked Periods\n') +
+    xlab('\n\n% of Time Property is Blocked') +
+    scale_x_continuous(breaks=seq(0, 1, .2),
+                       labels=c('0%', '20%', '40%', '60%', '80%', '100%')) +
+    #ggtitle('Block Rate vs. Nbr. of Blocked Periods\n') +
+     theme(plot.title = element_text(size = 10, hjust = 0.5),
+           axis.text.y=element_blank(),
+           axis.ticks.y=element_blank(),
+           plot.caption=element_text(size=6, hjust=0)) + 
+     labs(caption = paste0('\nCumulative time of blocking for short term properties ',
+                           '(x-axis) \nversus the total number of periods where the ',
+                           'property was \nblocked from nightly rental.',
+                           'Vertical lines delineate the three \nhost type groupings.'),
+          title = 'Block Rate vs Blocked Periods\n')+
+    geom_vline(xintercept = .25, linetype="dashed", color = "black", size=.5, alpha=.5)+
+    geom_vline(xintercept = .75, linetype="dashed", color = "black", size=.5, alpha=.5)
+  
+    png(filename = file.path(getwd(), 'images', "block_rate.png"), 
+       width = 5.5, height = 3, units = 'in', res = 300)
+
+       ggMultiPlots(host.block.freq, block.rate.period, cols=2)
+       
+    dev.off()  
+  
+```
+
+```{r host_types2}
+
+  base.host <- ggplot(str_tdf_all,
+                    aes(x=block_rate, y=blockpertime)) +
+                geom_point(alpha=.7, size=.4, shape=16, color='gray70') +
+                ylab('# Blckd Periods\n') +
+                xlab('\n% of Time Property is Blocked') +
+                ggtitle('Block Rate vs. Nbr. of Blocked Periods\n') +
+                scale_x_continuous(breaks=seq(0, 1, .2),
+                                   labels=c('0%', '20%', '40%',
+                                            '60%', '80%', '100%')) +
+                #scale_color_manual(values=c(abb.col[2], abb.col[4],
+                #                            abb.col[7], abb.col[9])) +
+                theme(legend.position='bottom',
+                      legend.title = element_blank(),
+                      plot.title = element_text(hjust = 0.5))+
+                guides(colour = guide_legend(override.aes = list(size=3,                                                                       alpha=1)))
+
+   ps.host <- base.host +
+    geom_point(data=str_tdf_all[str_tdf_all$host_type == 'Profit Seeker', ], size=.4)  +
+    ggtitle('Profit Seekers')
+
+  os.host <- base.host +
+    geom_point(data=str_tdf_all[str_tdf_all$host_type == 'Opportunistic Sharer', ],
+               size=.4)  +
+    ggtitle('Opportunistic Sharer')
+
+  un.host <- base.host +
+    geom_point(data=str_tdf_all[str_tdf_all$host_type == 'Unknown', ], size=.4)  +
+    ggtitle('Unknown')
+
+  png(filename = file.path(getwd(), 'images', "host_scat.png"), 
+       width = 4, height = 6.5, units = 'in', res = 300)
+
+    ggMultiPlots(ps.host, un.host, os.host, cols=1)
+
+  dev.off()  
+     
+```
+
+```{r plot_hostbar, message=FALSE, warning=FALSE, comment=FALSE, echo=FALSE, fig.height=3, fig.width=4, fig.cap='\\label{htc}Host Type Counts'}
+
+ ## Build plot
+
+  png(filename = file.path(getwd(), 'images', "host_bar.png"), 
+       width = 3, height = 3, units = 'in', res = 300)
+
+ ggplot(str_tdf_all, aes(host_type, fill=host_type)) +
+    geom_bar() +
+    scale_fill_manual(values=c(col_df$rgb[2], col_df$rgb[4], col_df$rgb[9]))+
+    theme(legend.position='none') +
+    ylab('') +
+    xlab('') +
+     theme(plot.title = element_text(size = 10, hjust = 0.5),
+           axis.text.y=element_blank(),
+           axis.text.x=element_text(size = 6),
+           axis.ticks.y=element_blank(),
+           plot.caption=element_text(size=6, hjust=0)) + 
+     labs(caption = paste0('\nBreakdown of Host Types for Short Term Properties:\n\n',
+                           '1) Profit Seekers:               <= 25% Blocked             3,056 Obs.\n',
+                           '2) Opportunistic Sharers:   >= 75% Blocked             1,743 Obs.\n',
+                           '3) Unknowns:                     25% > 75% Blocked       2,707 Obs.\n')) + 
+   annotate("text", x = 1, y = 3300, label = "41%") +
+   annotate("text", x = 2, y = 2000, label = "23%") +
+   annotate("text", x = 3, y = 2949, label = "36%") +
+   coord_cartesian(ylim=c(0,3500))
+
+  dev.off()  
+  
+```
+### Observation Bar Chart
+
+Here we make bar charts breaking down the number of observations by type and submarket. 
+
+```{r smtype.plot, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.width=9}
+ 
+  sm_col <- c(col_df$rgb[3], col_df$rgb[4], col_df$rgb[5], 
+              col_df$rgb[6])
+  
+   # Make Airbnb submarket map
+   str_tdf$Submarket <- as.character(str_tdf$geo_mrkt)
+   str_tdf$Submarket[str_tdf$Submarket == 'city-core'] <- '   City-Core   '
+   str_tdf$Submarket[str_tdf$Submarket == 'city'] <- '   City   '
+   str_tdf$Submarket[str_tdf$Submarket == 'beach'] <- '   Beach   '
+   str_tdf$Submarket[str_tdf$Submarket == 'suburban'] <- '   Suburban   '
+   str_tdf$Submarket <- factor(str_tdf$Submarket, 
+                                  levels = c('   City-Core   ', '   City   ', 
+                                             '   Suburban   ', '   Beach   '))
+   
+   strtype_bar <- ggplot() +
+     geom_bar(data=str_tdf, aes(x=Submarket, fill=Submarket)) +
+     scale_fill_manual(values=sm_col, name='Submarket') +
+     facet_wrap(~type) +
+     ylab('# of Properties\n') + xlab('')+
+     theme(legend.position = 'none',
+           legend.title = element_blank(),
+           axis.ticks.x=element_blank()) +
+     ggtitle('Short Term Properties')+
+     theme(plot.title = element_text(size = 10, hjust = 0.5),
+           axis.text.y=element_blank(),
+           axis.text.x=element_text(size = 6),
+           axis.ticks.y=element_blank(),
+           plot.caption=element_text(size=6, hjust=.5)) + 
+     labs(caption = paste0('\nBreakdown of 2,415 short-term properties by submarket and ',
+                           ' structure type.\n'))
+  # strtype_bar
+   
+   # Make Long term rental map
+ 
+   ltr_tdf$Submarket <- as.character(ltr_tdf$geo_mrkt)
+   ltr_tdf$Submarket[ltr_tdf$Submarket == 'city-core'] <- '   City-Core   '
+   ltr_tdf$Submarket[ltr_tdf$Submarket == 'city'] <- '   City   '
+   ltr_tdf$Submarket[ltr_tdf$Submarket == 'beach'] <- '   Beach   '
+   ltr_tdf$Submarket[ltr_tdf$Submarket == 'suburban'] <- '   Suburban   '
+   ltr_tdf$Submarket <- factor(ltr_tdf$Submarket, 
+                                  levels = c('   City-Core   ', '   City   ', 
+                                             '   Suburban   ', '   Beach   '))
+   ltrtype_bar <- ggplot() +
+     geom_bar(data=ltr_tdf, aes(x=Submarket, fill=Submarket)) +
+     scale_fill_manual(values=sm_col) +
+     facet_wrap(~type) +
+     ylab('# of Properties\n') + xlab('')+
+     theme(legend.position = 'none',
+           legend.title = element_blank(),
+           axis.text.x=element_blank(),
+           axis.ticks.x=element_blank()) +
+     ggtitle('Long Term Properties')+
+     theme(plot.title = element_text(size = 10, hjust = 0.5),
+           axis.text.y=element_blank(),
+           axis.text.x=element_text(size = 6),
+           axis.ticks.y=element_blank(),
+           plot.caption=element_text(size=6, hjust=.5)) + 
+     labs(caption = paste0('\nBreakdown of 64,305 long-term properties by submarket and ',
+                           ' structure type\n'))
+     #ltrtype_bar
+   
+     png(filename = file.path(getwd(), 'images', "loc_bar.png"), 
+       width = 8, height = 4, units = 'in', res = 300)
+ 
+     ggMultiPlots(strtype_bar, ltrtype_bar, cols=2)
+     dev.off()  
+ 
+       
+```
+## Suburb Location Map
+
+We start by create the maps of the observation locations, the study area and the suburb boundaries. 
+
+First the suburb boundaries and study areas. 
+
+```{r sub_loc.map, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  # Set submarket colors
+  suburb_sf$col <- 'gray80'
+  suburb_sf$col[suburb_sf$class == 'Middle'] <- 'gray50'
+  suburb_sf$col[suburb_sf$class == 'Inner'] <- 'gray20'
+  
+  inn_sf <- suburb_sf %>% dplyr::filter(class == 'Inner') %>% st_union()
+  mid_sf <- suburb_sf %>% dplyr::filter(class == 'Middle' & 
+                                          name != 'Seabrook' &  
+                                           name != 'Altona Meadows') %>% st_union()
+  
+  sub_sdf <- ltr_tdf %>%
+    group_by(suburb.x, Submarket) %>%
+    dplyr::summarize(count=n())
+  sub_sf <- suburb_sf %>%
+    dplyr::left_join(sub_sdf %>%
+                       dplyr::select(name = suburb.x, Submarket))
+  
+  cc_sf <- sub_sf %>% dplyr::filter(Submarket == '   City-Core   ') %>% st_union()
+  beach_sf <- sub_sf %>% dplyr::filter(Submarket == '   Beach   ') %>% st_union()
+  
+   # Make map
+  
+  png(filename = file.path(getwd(), 'images', "sub_loc_map.png"), 
+       width = 4.5, height = 4.5, units = 'in', res = 300)
+
+  tm_shape(suburb_sf %>% dplyr::filter(class != 'Outer')) +
+    tm_polygons("class", palette=c('gray50', 'gray80'), title='Suburb Class') +
+  tm_shape(studyarea_sf) + 
+    tm_borders(col='black', lwd=5) +
+    tm_add_legend(type='fill', border.lwd=3, col='white', border.col='black',
+                  title='Study Area')+
+  tm_layout(
+    legend.position = c("left","bottom"),
+    legend.text.size = 0.5)
+  
+  dev.off()  
+  
+```
+
+## Point Location Maps
+
+We then add the short and long term observation locations to the maps. 
+
+```{r location map}
+
+
+  ltr_map <-   tm_shape(mid_sf) + 
+    tm_fill(col='gray95', lwd=1) +
+    tm_borders(col = 'gray40', lwd=1) +
+  tm_shape(inn_sf) + 
+    tm_fill(col='gray85', lwd=1) +  
+  tm_shape(cc_sf) + 
+    tm_fill(col='gray75', lwd=1) +
+  tm_shape(beach_buffer) + 
+    tm_fill(col='gray65', lwd=1) +
+  tm_shape(suburb_sf %>% dplyr::filter(in_studyarea == 1)) +
+    tm_borders(col='gray70', lwd=.5) +
+  tm_shape(studyarea_sf) + 
+    tm_borders(col='black', lwd=2) +
+  tm_shape(ltr_sf %>% dplyr::rename(Submarket = geo_mrkt)) +
+    tm_symbols('Submarket', size=.02,
+               palette = sm_col, alpha=.9, shape=16, legend.col.show=TRUE)+
+    tm_layout(title = "LTR Observations",
+              title.position = c("left", "top"),
+              title.size = .8) +
+  tm_shape(inn_sf) + 
+    tm_borders(col = 'gray40', lwd=1) +
+  tm_shape(cc_sf) + 
+    tm_borders(col = 'gray40', lwd=1) +
+  tm_shape(beach_buffer) + 
+    tm_borders(col = 'gray40', lwd=1)
+  
+  
+  str_map <-   tm_shape(mid_sf) + 
+    tm_fill(col='gray95', lwd=1) +
+    tm_borders(col = 'gray40', lwd=1) +
+  tm_shape(inn_sf) + 
+    tm_fill(col='gray85', lwd=1) +  
+  tm_shape(cc_sf) + 
+    tm_fill(col='gray75', lwd=1) +
+  tm_shape(beach_buffer) + 
+    tm_fill(col='gray65', lwd=1) +
+  tm_shape(suburb_sf %>% dplyr::filter(in_studyarea == 1)) +
+    tm_borders(col='gray70', lwd=.5) +
+  tm_shape(studyarea_sf) + 
+    tm_borders(col='black', lwd=2) +
+  tm_shape(str_sf %>% dplyr::rename(Submarket = geo_mrkt)) +
+    tm_symbols('Submarket', size=.02,
+               palette = sm_col, alpha=.9, shape=16, legend.col.show=TRUE)+
+    tm_layout(title = "STR Observations",
+              title.position = c("left", "top"),
+              title.size = .8) +
+  tm_shape(inn_sf) + 
+    tm_borders(col = 'gray40', lwd=1) +
+  tm_shape(cc_sf) + 
+    tm_borders(col = 'gray40', lwd=1) +
+  tm_shape(beach_buffer) + 
+    tm_borders(col = 'gray40', lwd=1)
+  
+  
+  sltr_map <- tmap_arrange(ltr_map, str_map) 
+    
+  png(filename = file.path(getwd(), 'images', "ltr_loc_map.png"), 
+       width = 7, height = 3.5, units = 'in', res = 300)
+    sltr_map
+  dev.off()  
+    
+
+
+```
+
+
+
+### Revenue Density
+
+Here we make the density plots of the short and long term observed revenues. 
+
+```{r maps}
+
+   dens_cols <- c(col_df$rgb[3], col_df$rgb[1], col_df$rgb[2])
+
+   # Add together for plotting
+   rev_df <- bind_rows(str_tdf %>% 
+                         dplyr::select(type, revenue=revenue_net) %>%
+                         dplyr::mutate(tenure = '  Short Term (Actual)   ',
+                                       alpha = .5),
+                       str_tdf %>% 
+                         dplyr::select(type, revenue=pot_revenue_net) %>%
+                         dplyr::mutate(tenure = '  Short Term (Potential)   ',
+                                       alpha = .4),
+                       ltr_df %>%
+                         dplyr::select(type, revenue=gross_revenue) %>%
+                         dplyr::mutate(tenure = '  Long-Term   ',
+                                       alpha = .9))
+
+  png(filename = file.path(getwd(), 'images', "rev_dens.png"), 
+       width = 5.5, height = 4, units = 'in', res = 300)
+ 
+   ggplot(rev_df,
+          aes(x=revenue, fill=tenure, color=tenure)) +
+    geom_density(alpha=.5) +
+    scale_fill_manual(values=dens_cols) +
+    scale_color_manual(values=dens_cols) +
+    # ggtitle('Revenue Comparison: Short Term vs Long Term Properties') +
+    xlab('Annual Revenue (A$)') +
+    ylab('')+
+    scale_x_continuous(breaks=c(seq(0,60000, by=20000)),
+                       labels=c('A$0', 'A$20,000', 'A$40,000', 'A$60,000'))+
+    theme(legend.position='bottom',
+          legend.title = element_blank())+
+     theme(plot.title = element_text(size = 10, hjust = 0.5),
+           axis.text.y=element_blank(),
+           axis.text.x=element_text(size = 6),
+           axis.ticks.y=element_blank(),
+           plot.caption=element_text(size=6, hjust=0)) + 
+     labs(caption = paste0('\nComparison of the distribution of observed long-term rental',
+                           ' revenues of 64,305 properties (blue) to observed revenues of ', 
+                           ' 2,415 short\nterm properties (pink).  The purple curve ',
+                           ' represents the potential revenues of the 2,415 short term ',
+                           ' properties (includes imputed bookings).')) +
+    coord_cartesian(xlim=c(0, 70000)) 
+
+    dev.off()  
+        
+```
+
+### Compare Imputation methods
+
+We build a plot to compare the two imputation methods, hedonic and KNN. 
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=FALSE}
+    
+  library(ggplot2)
+
+   load(file.path('c:/code', 'research', 'airbnbMelbourne',
+                  'data', 'analyzed', 'reviewers.RData'))
+
+  imp_df$bed_lab <- paste0(imp_df$bedrooms, ' Beds')
+  fig_cap <- paste0('This figure compares the estimated long term rent for short term rental properties via the hedonic imputation\nmethod (X-axis) and the matched pairs-type method (Y-axis).  It is broken down by bedroom count and\nstructure type (Apartment vs House). Overall correlation is 89.4%')
+  
+  png(filename = file.path(getwd(), 'images', "imp_cor.png"), 
+       width = 7, height = 4, units = 'in', res = 300)
+
+  ggplot(imp_df,
+         aes(x=ltr_imp_revenueH, y=ltr_imp_revenueK, col = type)) + 
+    geom_point(alpha = .5, size=.5) + 
+    facet_grid(type ~ bed_lab) + 
+    xlab('\nHedonic Revenue (A$)\n') + 
+    ylab('Matched Pairs Revenue (A$)\n') + 
+    theme(legend.position = 'none',
+          plot.caption=element_text(hjust = 0),
+          plot.title = element_text(hjust = 0.5)) +
+    scale_color_manual(values = c(col_df$rgb[8], col_df$rgb[10])) + 
+    scale_x_continuous(breaks = c(15000, 30000, 45000),
+                       labels = c('$15k', '$30k', '$45k'))+
+    scale_y_continuous(breaks = c(15000, 30000, 45000),
+                       labels = c('$15k', '$30k', '$45k'))+
+    geom_abline(intercept = 0, slope = 1, linetype = 2,
+                color = 'gray50') +
+    labs(caption = fig_cap)
+ 
+  dev.off()  
+   
+
+```
+
+## Conditional Expectation Plots
+
+Finally, we build the conditional expectation plots.  
+
+First, the 1 bed/1bath option. 
+
+```{r}
+ ## 1/1 plots
+  x <- pred_df[pred_df$bedbath == "1_1", ]
+  cap11 <- paste0('Plot shows the conditional probability of short term preference for ',
+                  '1 bedroom, 1 bathroom homes given differences\n',
+                  'in their structure type (Apt vs House), cancellation policy (strict',
+                  ' vs flexible), location (City-Core, City, Beach, Suburban),\n',
+                  'Number of allowed guest per bedroom and minimum number of night stay ',
+                  'reguired. Larger and darker dots indicate\na higher probabilty ',
+                  'of short-term preference with full dots showing 50%+.')
+
+  ggplot(x, aes(x=ms, y=gpb, color = prob)) + 
+    geom_point(aes(shape = sh, size = prob)) + 
+    facet_grid(sm~ct) +
+    scale_color_gradient(low='gray80', high='black', name='STP Probability',
+                         labels = c('0%', '25%', '50%', '75%'),
+                         breaks = c(0,.25, .50, .75)) +
+    scale_shape_manual(values = c(16,1), name = 'Is STP?', labels=c('True', 'False')) + 
+    scale_size(range = c(.5, 3), guide = FALSE) + 
+    xlab('\n Minimum Stay  (In Days)\n') +
+    ylab('Allowed Guests per Bedroom\n') + 
+    labs(title = '1 Bed, 1 Bath Home - Conditional STP Probabilities\n',
+         caption = cap11) + 
+    theme(plot.caption=element_text(hjust = 0),
+          plot.title = element_text(hjust = 0.5)) -> cpp_11
+  
+  
+  png(filename = file.path(getwd(), 'images', "cpp_11.png"), 
+       width = 7, height = 5, units = 'in', res = 300)
+     cpp_11
+  dev.off()
+       
+```
+
+And then the 3bed, 2bath option.  
+
+```{r}
+
+ ## 3/2 plots
+  x <- pred_df[pred_df$bedbath == "3_2", ]
+  cap11 <- paste0('Plot shows the conditional probability of short term preference for ',
+                  '3 bedroom, 2 bathroom homes given differences\n',
+                  'in their structure type (Apt vs House), cancellation policy (strict',
+                  ' vs flexible), location (City-Core, City, Beach, Suburban),\n',
+                  'Number of allowed guest per bedroom and minimum number of night stay ',
+                  'reguired. Larger and darker dots indicate\na higher probabilty ',
+                  'of short-term preference with full dots showing 50%+.')
+
+  ggplot(x, aes(x=ms, y=gpb, color = prob)) + 
+    geom_point(aes(shape = sh, size = prob)) + 
+    facet_grid(sm~ct) +
+    scale_color_gradient(low='gray80', high='black', name='STP Probability',
+                         labels = c('0%', '25%', '50%', '75%'),
+                         breaks = c(0,.25, .50, .75)) +
+    scale_shape_manual(values = c(16,1), name = 'Is STP?', labels=c('True', 'False')) + 
+    scale_size(range = c(.5, 3), guide = FALSE) + 
+    xlab('\n Minimum Stay (In Days)\n') +
+    ylab('Allowed Guests per Bedroom\n') + 
+    labs(title = '3 Bed, 2 Bath Home - Conditional STP Probabilities\n',
+         caption = cap11) + 
+    theme(plot.caption=element_text(hjust = 0),
+          plot.title = element_text(hjust = 0.5)) -> cpp_32
+  
+  
+  png(filename = file.path(getwd(), 'images', "cpp_32.png"), 
+       width = 7, height = 5, units = 'in', res = 300)
+     cpp_32
+  dev.off()
+       
+```
+

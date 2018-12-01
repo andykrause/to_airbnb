@@ -1,0 +1,250 @@
+---
+title: "Script 2: Pre Processing of the Long Term Data"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+This script executes a number of long running data preparation process necessary to analyze the long term rental data.  If you re-knit this file (with RMarkdown) the code will not evaluate.  To actually evaluate the code you must manually re-run the code chunks. 
+
+```{r setup, include=FALSE}
+
+  knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+
+```
+
+## Preliminary Commands
+
+We begin by setting `stringsAsFactors` to FALSE to avoid unnecessary factor conversions.
+
+```{r saf}
+
+ options(stringsAsFactors=FALSE)
+
+```
+
+Next, we load the necessary libraries
+
+```{r load_libraries}
+
+  library(plyr)
+  library(stringr)
+  library(lubridate)
+  library(dplyr)
+  library(multidplyr) # Note you have to install from the github site hadley/multidplyr
+  library(tidyr)
+  library(tibble)
+  library(magrittr)
+
+```
+
+We then load the custom functions.
+
+```{r set_paths}
+
+  source(file.path(getwd(), 'functions', "abb_Functions.R"))
+
+```
+
+Finally, we set the date of analysis (Sept 1, 2015) to help limit the data size.
+
+```{r anl_date}
+
+  anl_date <- as.Date('2015-09-01')
+
+```
+
+## Load Data
+
+Next, we load the long term rental data. 
+
+```{r load_data}
+ 
+  ltr_df <- read.csv(file.path(getwd(), 'data', 'raw', 'ltr_data.csv'), header=T)
+
+```
+
+We then trim the data fields to those that are needed in the future analyses
+
+```{r trim_fields}
+
+  # Convert to lower case
+  names(ltr_df) <- tolower(names(ltr_df))
+
+  # Trim Fields
+  ltr_df <- ltr_df %>%
+    dplyr::select(geo_id=geographicalid, event_id=eventid, 
+                  addr_id=addressid, activity_id=activityid, flat_nbr=flatnumber,
+                  str_nbr=streetnumber, str_name=streetname, str_type=streettype, 
+                  suburb, postcode, latitude=property_latitude,
+                  longitude=property_longitude, str_latitude=street_centroid_latitude,
+                  str_longitude=street_centroid_longitude,
+                  date=eventdate, price=eventprice,
+                  first_date=firstadvertisedeventdate,
+                  first_price=firstadvertisedeventprice, 
+                  last_date=lastadvertisedeventdate,
+                  last_price=lastadvertisedeventprice,property_type=propertytype, 
+                  area_size=areasize, bedrooms, baths, parking, has_study=hasstudy, 
+                  has_courtyard=hascourtyard, has_balcony=hasbalcony, 
+                  has_ac=hasairconditioning, has_garage=hasgarage)
+
+```
+
+A small portion of the observations are missing the necessary identification fields (Event, Address or Activity ID) to proceed.  These are removed.
+
+```{r filter_NA_ids}
+
+  ltr_df <- ltr_df %>%
+    dplyr::filter(!is.na(event_id)) %>%
+    dplyr::filter(!is.na(addr_id)) %>%
+    dplyr::filter(!is.na(activity_id))
+
+```
+
+The dates in the data are not consistent, some have time stamps, others not.  We have created a custom function to correct these and convert them to R standard format. 
+
+```{r fix_dates}
+
+  ltr_df$last_date <- fixAPMDates(ltr_df$last_date)
+  ltr_df$first_date <- fixAPMDates(ltr_df$first_date)
+  ltr_df$date <- fixAPMDates(ltr_df$date)
+
+```
+
+In order to speed up the future calculations, we then remove an observations prior to 2014. 
+
+```{r trim_2014}
+  
+  ltr_df <- ltr_df %>% 
+    dplyr::filter(lubridate::year(date) >= 2014)
+  
+```
+
+Next, we create a unique identifier (by market transaction, not by observation in the data) for each rental transaction.  Note that there are still, often, multiple observations per transaction due to the listing change data. 
+
+```{r uniq_trans}
+
+  ltr_df <- ltr_df %>%
+    dplyr::group_by(addr_id) %>%
+    dplyr::arrange(date) %>%
+    mutate(trans_id = as.numeric(as.factor(activity_id)),
+           uniq_id = paste0(addr_id, '_', trans_id)) %>%
+    dplyr::select(uniq_id, addr_id, trans_id, everything()) %>%
+    ungroup()
+
+```
+
+## Property vs Transaction Data
+
+Next, we split the data into property specific information and transaction specific information and carry out individual preparation on each (and will re-combine later).
+
+```{r split_infotype}
+
+  # Split off transaction information
+  ltr_trans <- ltr_df %>%
+    dplyr::select(addr_id, uniq_id, trans_id, date, price, first_date, first_price, 
+                  last_date, last_price)
+
+  # Split off property information
+  ltr_prop <- ltr_df %>%
+    dplyr::select(addr_id, uniq_id, flat_nbr, str_nbr, str_name, str_type, suburb,
+                  postcode, latitude, longitude, str_latitude, str_longitude,
+                  property_type, area_size, bedrooms, baths, parking, has_study,
+                  has_courtyard, has_balcony, has_ac, has_garage)
+  
+```
+
+For the transaction data, we condense it down to one observation per rental.  Here we take the latest activitiy record (without an NA in price) for all observations that were first list on or after Jan 1, 2014.  We also calculate a total days on market as well. 
+
+```{r rec_trans}
+    
+  ltr_trans <- ltr_trans %>%
+    dplyr::group_by(uniq_id) %>%
+    dplyr::arrange(desc(date)) %>%
+    dplyr::filter(!is.na(price)) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(date=if_else(date < last_date, last_date, date),
+                  dom=as.numeric(last_date - first_date)) %>%
+    dplyr::filter(first_date >= as.Date('2014-01-01')) %>%
+    dplyr::select(addr_id, uniq_id, trans_id, date, price, dom) %>%
+    tidyr::nest(-addr_id, .key='trans_data')
+
+```
+
+Because some of the property data shows different information at different listing times, we must reconcile this information.  Since the properties span a short time frame, we reconcile the data for each address.  
+
+We start by splitting off the location data.  Across properties this data has shown to be very robust, so we take one record set for each address. 
+
+```{r rec_prop_1}
+
+  ltr_loc <- ltr_prop %>%
+    dplyr::group_by(addr_id) %>%
+    dplyr::slice(1) %>%
+    dplyr::select(addr_id, flat_nbr, str_nbr, str_name, str_type, suburb, postcode,
+                  latitude, longitude, str_longitude, str_latitude) %>%
+    dplyr::mutate(latitude = if_else(is.na(latitude), str_latitude, latitude),
+                  longitude = if_else(is.na(longitude), str_longitude, longitude)) %>%
+    dplyr::select(-str_latitude, -str_longitude) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate_at(.vars=c('flat_nbr', 'str_nbr', 'str_name', 'str_type', 'suburb'),
+                     .funs=trimws)
+
+```
+
+Next, we isolate property characteristics data.  Here is where most of the discrepancies are located.  To fix any anomolies and fix missing values, we take reconcile each address based on simple set of rules: always take a value over an NA, take the greater of integer values.  
+
+```{r rec_prop_2}
+
+  ltr_pc <- ltr_prop %>%
+    dplyr::select(addr_id, uniq_id, property_type, area_size, bedrooms, baths, parking,
+                  has_study, has_courtyard, has_balcony, has_ac, has_garage) %>%
+    dplyr::group_by(uniq_id) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(addr_id) %>%
+    dplyr::summarize(property_type = property_type[1],
+                     area_size = max(area_size, na.rm=T),
+                     bedrooms = max(bedrooms, na.rm=T),
+                     baths = max(baths, na.rm=T),
+                     parking = max(parking, na.rm=T),
+                     has_study = if_else('True' %in% has_study, TRUE, FALSE),
+                     has_courtyard = if_else('True' %in% has_courtyard, TRUE, FALSE),
+                     has_balcony = if_else('True' %in% has_balcony, TRUE, FALSE),
+                     has_ac = if_else('True' %in% has_ac, TRUE, FALSE),
+                     has_garage = if_else('True' %in% has_garage, TRUE, FALSE)) %>%
+   dplyr::mutate_at(.vars=c('area_size', 'bedrooms', 'baths', 'parking'),
+                    .funs=function(x) ifelse(!is.finite(x), NA, x))
+
+
+```
+
+Recombine the location and property characteristics data. 
+
+```{r merge_loc_prop}
+
+  ltr_prop <- ltr_loc %>%
+    inner_join(ltr_pc, by='addr_id')
+
+```
+
+We then recombine the property and transaction data (which is nested for efficiency).
+
+```{r merge_prop_trans}
+ 
+ ltr_tdf <- ltr_prop %>%
+   dplyr::inner_join(ltr_trans, by='addr_id')
+ 
+```
+
+### Output Data
+
+Finally, we write out the long term rental data to an R object
+
+```{r write_out}
+
+ dir.create(file.path(getwd(), 'data', 'prepared'))
+ saveRDS(ltr_tdf, file=file.path(getwd(), 'data', 'prepared', 'ltr_data.RDS'))
+
+```

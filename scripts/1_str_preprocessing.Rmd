@@ -1,0 +1,206 @@
+---
+title: "Script 1: Pre Processing of the Short Term Data"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+This script executes a number of very long running data preparation process necessary to analyze the short term rental (Airbnb) data.  If you re-knit this file the code will not evaluate.  To actually evaluate the code you must manually re-run the code chunks individually. 
+
+```{r setup, include=FALSE}
+
+  knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+
+```
+
+## Preliminary Commands
+
+We begin by setting `stringsAsFactors` to FALSE to avoid unnecessary factor conversions
+
+```{r saf}
+
+ options(stringsAsFactors=FALSE)
+
+```
+
+Next, we load the necessary libraries
+
+```{r load_libraries, warnings=FALSE, message=FALSE}
+
+  library(plyr)
+  library(stringr)
+  library(lubridate)
+  library(dplyr)
+  library(multidplyr) # Note you have to instal from the github site hadley/multidplyr
+  library(tidyr)
+  library(tibble)
+  library(magrittr)
+
+```
+
+We then set the paths to the data
+
+```{r set_paths, echo=TRUE}
+
+  source(file.path(getwd(), 'functions', "abb_Functions.R"))
+
+```
+
+Finally, we set the date of analysis (Sept 1, 2015) to help limit the data size
+
+```{r anl_date}
+
+  anl_date <- as.Date('2015-09-01')
+
+```
+
+## Load and Combine Data
+
+Next, we load the data. There are two files for each the property level data as well as the daily observation data.
+
+```{r load_data}
+   
+  # Property information
+  str_prop_1 <- read.csv(file.path(getwd(), 'data', 'raw', 'str_prop_1.csv'), header=T)
+  str_prop_2 <- read.csv(file.path(getwd(), 'data', 'raw', 'str_prop_2.csv'), header=T)
+
+  # Daily rental information
+  str_daily_1 <- read.csv(file.path(getwd(), 'data', 'raw', 'str_daily_1.csv'), header=T)
+  str_daily_2 <- read.csv(file.path(getwd(), 'data', 'raw', 'str_daily_2.csv'), header=T)
+  
+```
+
+We then combine the two files for each type, standardize the field names and select only those fields which we need going forward.  We add a data origin field to the property level information so that we can take the most recent observation in later de-duplication processes. 
+
+```{r tcr_data}
+
+  # Property data
+  str_df <- dplyr::bind_rows(str_prop_1 %>% 
+                               dplyr::mutate(origin = 1), 
+                             str_prop_2 %>% 
+                               dplyr::mutate(origin = 2)) %>%
+    dplyr::select(property_id=Property.ID, host_id=Host.ID, listing_title=Listing.Title, 
+                  property_type=Property.Type, listing_type=Listing.Type,
+                  created_date=Created.Date, latitude=Latitude, longitude=Longitude,
+                  rating=Overall.Rating, max_guests=Max.Guests, 
+                  canc_policy=Cancellation.Policy, cleaning_fee=Cleaning.Fee, 
+                  nightly_rate=Published.Nightly.Rate, 
+                  weekly_rate=Published.Weekly.Rate, monthly_rate=Published.Monthly.Rate, 
+                  avg_nightly_rate=Average.Daily.Rate, min_stay=Minimum.Stay, 
+                  bedrooms=Bedrooms, bathrooms=Bathrooms, origin)
+
+  # Clean up
+  rm(str_prop_1); rm(str_prop_2)
+  
+  # Daily data
+  daily_df <- dplyr::bind_rows(str_daily_1, str_daily_2) %>%
+    dplyr::select(property_id=Property.ID, date=Date, status=Status, price=Price,
+                  book_date=Booked.Date, resv_id=Reservation.ID)
+  
+  # Clean up
+  rm(str_daily_1); rm(str_daily_2);gc()
+
+```
+
+## Prepare Data
+
+Due to our combining of data, we have many duplicate observations.  We now remove any duplicates.  Note that the daily data in its raw format does not have a unique identifier, so we much first create one by combining the property id with the date of the observation. 
+    
+```{r uniq_ids}    
+
+  # Property data
+  str_df <- str_df %>% 
+    dplyr::arrange(desc(origin)) %>%
+    dplyr::filter(!duplicated(property_id)) %>%
+    dplyr::select(-origin)
+  
+  # Daily data
+  daily_df <- daily_df %>%
+    dplyr::mutate(uniq_id = paste0(property_id, '_', date)) %>%
+    dplyr::filter(!duplicated(uniq_id))
+  
+```
+
+The date fields read in as characters, so we also must convert these to an R date format. 
+
+```{r fix_dates}
+
+  # Daily data
+  daily_df$date <- lubridate::as_date(daily_df$date)
+  daily_df$book_date <- lubridate::as_date(daily_df$book_date)
+  
+  # Property level data
+  str_df$created_date <- lubridate::as_date(str_df$created_date)
+  str_df$created_year <- lubridate::year(str_df$created_date)
+
+```
+
+Next, we trim the daily data by date, limiting the observations to the one month period from September 1 2015 to August 31, 2016. We'll eliminate the property-level observations which are outside of the range through a future join. 
+
+```{r date_trim}
+
+  daily_df <- daily_df %>%
+    dplyr::filter(date >= anl_date &
+                    date <= anl_date + 365)
+
+```
+
+For each property in the short term data, we then calculate some summary statistics of its listing history such as the earliers and latest date for each, the total days on Airbnb, number of blocked periods, its occupancy/available/blocked rate, median length of block period and total number of bookings.
+
+To speed up this calculate, we compute these summary statistics in parallel.  Total run time will depend on your system.  
+
+```{r summ_stats}
+
+  # Create new cluster
+  abb_cl <- get_default_cluster() 
+  
+  # Register function and variable
+  cluster_copy(abb_cl, abbCalcBookStr)
+
+  # Summarize daily by property
+  daily_summ <- daily_df %>% 
+    multidplyr::partition(property_id, cluster=abb_cl) %>% 
+    dplyr::do(abbCalcBookStr(.)) %>% 
+    dplyr::collect()
+
+```
+
+We then join the summary stats to the property-level data with an inner join, meaning that any properties without oservations in this period are removed.  
+
+```{r join_summ}
+
+  str_df <- str_df %>%
+    dplyr::inner_join(daily_summ, 
+                      by='property_id')
+
+```
+
+In order to store all of our data efficiency in a single object, we now **nest** the daily observations for each property into a list-column (each property observation will contain a data.frame of daily observations).
+
+```{r join_nest}
+
+  # Nest daily data
+  daily_tdf <- daily_df %>%
+    as.tibble() %>%
+    multidplyr::partition(property_id, cluster=abb_cl) %>% 
+    dplyr::do(tidyr::nest(., -property_id, .key='daily_data')) %>% 
+    dplyr::collect()
+  
+  # Add nested daily data to structural data
+  str_tdf <- str_df %>%
+    as.tibble() %>%
+    left_join(daily_tdf, by='property_id')
+ 
+```
+
+### Export Data
+
+Finally, we write out the date to an RDS object for future use. 
+
+```{r write_out}
+ 
+ dir.create(file.path(getwd(), 'data', 'prepared'))
+ saveRDS(str_tdf, file=file.path(getwd(), 'data', 'prepared', 'str_data.RDS'))
+ 
+```

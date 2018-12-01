@@ -1,0 +1,321 @@
+---
+title: "Script 4: Data Analysis and Modeling"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+
+  knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+
+```
+
+### Introduction
+
+This document describes all of the code used to the generate the output included in the 'To Airbnb?' study. This analysis uses the output from the **3_data_prep.rmd** file found in the same online repository. 
+
+## Preliminary Commands
+
+&nbsp;
+
+We begin with a number of preliminary commands.  First we load all of the necessary R libraries for this analysis. 
+
+```{r load_libraries, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+
+  library(tidyverse)
+  library(sf)
+  library(geosphere)
+  library(ggmap)
+  library(multidplyr)
+  library(tmap)
+
+```
+
+```{r set_options, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+
+  options(stringsAsFactors=FALSE)
+  options(xtable.comment = FALSE)
+  options(xtable.caption.placement='top')
+
+```
+
+Next, we source the necessary custom code files for the analysis.  
+
+```{r source_files, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+
+  source(file.path(getwd(), 'functions', 'abb_Functions.R'))
+
+```
+
+### Set Parameters
+
+```{r set_constants, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+  
+  # Exchange rate: AUS to US 
+  exch_rate <- 1.32  
+
+  # Date of investment decision
+  decision_date <- lubridate::as_date('2015-09-01')
+  
+```
+
+## Load Data
+
+We then load the data.
+
+```{r load_data, message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE} 
+
+  load(file.path(getwd(), 'data', 'prepared', 'prepared_data.RData'))
+  str_col = col_df$rgb[1]
+  
+```
+
+#### Compare Revenue Distributions
+
+```{r flatten_ltr}
+
+  ltr_df <- ltr_tdf %>% 
+    unnest() %>%
+    select(-suburb.x) %>%
+    rename(suburb=suburb.y)
+
+```
+
+Before we examine the distributions of the observed short-term revenues and the estimated long-term revenues, we must produce the estimates of long-term revenue for the short-term properties.
+
+We start by specifying the imputation model specification we will use to estimated likely long-term (weekly) rental prices for each short-term property.
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  ltr_mod_spec <- formula(log(price) ~ as.factor(type) +
+                            as.factor(bedbath) + as.factor(suburb) +
+                            as.factor(month))
+
+```
+
+We then employ a custom function to impute the long term rents for the short-term properties.  The 'clip.field' is a spatial fixed effects that add spatial recognition to the models.
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  str_tdf$tbg <- paste0(str_tdf$product,'_', str_tdf$geo_mrkt)
+  ltr_df$tbg <- paste0(ltr_df$product,'_', ltr_df$geo_mrkt)
+
+  imp_df <- abbImputeCompare(str.df=str_tdf, 
+                                ltr.df=ltr_df, 
+                                mod.spec=ltr_mod_spec, 
+                                match.factor='suburb',
+                                split.field='tbg', 
+                                verbose=FALSE) 
+  
+```
+
+Next, we also impute prices via a KNN approach
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  kimp_df <- knnImputeWrap(ltr_df = ltr_df, 
+                           str_df = str_tdf,
+                           knns = c(7,7))
+  
+  imp_df$ltr_imp_revenueK <- kimp_df$year[match(imp_df$property_id,
+                                               kimp_df$property_id)]
+
+```
+
+We then merge the imputed values
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  imp_df <- imp_df %>%
+    rename(ltr_imp_revenueH = ltr_imp_revenue) %>%
+    mutate(ltr_imp_revenueK = ((365-imp_dom)/365) * ltr_imp_revenueK,
+           ltr_imp_revenue = .5 * (ltr_imp_revenueH + ltr_imp_revenueK))
+  
+  imp_df <- imp_df %>%
+    left_join(str_tdf %>%
+                dplyr::select(property_id, bedrooms, bathrooms, type, latitude,
+                              longitude),
+              by='property_id')
+ 
+```
+
+From the imputed results, we extract the imputed rental values and merge to the original short-term data.
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  # Extract out DFs (only those that imputed)
+  str_tdf <- str_tdf %>%
+    dplyr::left_join(imp_df %>%
+                       dplyr::select(-c(bedrooms, bathrooms, type, latitude, longitude)),
+                     by='property_id') %>%
+    dplyr::mutate(act_pref = ifelse(revenue_net > ltr_imp_revenue, 1, 0),
+                  # lik_pref = ifelse(lik_revenue_net > ltr_imp_revenue, 1, 0),
+                  pot_pref = ifelse(pot_revenue_net > ltr_imp_revenue, 1, 0),
+                  pot_pref_mc = ifelse(pot_revenue_net * .85 > ltr_imp_revenue, 1, 0),
+                  pot_pref_us = ifelse(pot_revenue_net > ltr_imp_revenue * .85, 1, 0))
+
+```
+
+## Logit models
+
+Now we attempt to explain the drivers of preference with a set of logistic regression models.  
+
+First, a basic model with just structural characteristics. We estimate using the standard dependent variable as well as the two sensitivity scenarios. 
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  glm_pot_str <- glm(pot_pref~type+as.factor(bedbath),
+                       family=binomial(link='logit'),
+                       data=str_tdf)
+  glm_pot_str_mc <- glm(pot_pref_mc~type+as.factor(bedbath),
+                       family=binomial(link='logit'),
+                       data=str_tdf)
+  glm_pot_str_us <- glm(pot_pref_us~type+as.factor(bedbath),
+                       family=binomial(link='logit'),
+                       data=str_tdf)
+  
+```
+
+Then a model that adds in the geographic submarkets
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  glm_pot_loc <- glm(pot_pref ~ type + as.factor(bedbath)+ as.factor(geo_mrkt),
+                     family=binomial(link='logit'),
+                     data=str_tdf)
+  glm_pot_loc_mc <- glm(pot_pref_mc ~ type + as.factor(bedbath)+ as.factor(geo_mrkt),
+                     family=binomial(link='logit'),
+                     data=str_tdf)
+  glm_pot_loc_us <- glm(pot_pref_us ~ type + as.factor(bedbath)+ as.factor(geo_mrkt),
+                     family=binomial(link='logit'),
+                     data=str_tdf)
+```
+
+Finally a model that adds in host policies. 
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+
+  glm_pot_host <- glm(pot_pref ~ type + as.factor(bedbath) + as.factor(geo_mrkt) +
+                        I(max_guests/bedrooms) + min_stay + I(canc_policy == 'Flexible'),
+                      family=binomial(link='logit'),
+                      data=str_tdf)
+  glm_pot_host_mc <- glm(pot_pref_mc ~ type + as.factor(bedbath) + as.factor(geo_mrkt) +
+                        I(max_guests/bedrooms) + min_stay + I(canc_policy == 'Flexible'),
+                      family=binomial(link='logit'),
+                      data=str_tdf)
+  glm_pot_host_us <- glm(pot_pref_us ~ type + as.factor(bedbath) + as.factor(geo_mrkt) +
+                        I(max_guests/bedrooms) + min_stay + I(canc_policy == 'Flexible'),
+                      family=binomial(link='logit'),
+                      data=str_tdf)
+  
+```
+
+We package these all together into a lists of results for eacy storage
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  pot_glms <- list(str=glm_pot_str,
+                   loc=glm_pot_loc,
+                   host=glm_pot_host)
+  pot_mc_glms <- list(str=glm_pot_str_mc,
+                   loc=glm_pot_loc_mc,
+                   host=glm_pot_host_mc)
+  pot_us_glms <- list(str=glm_pot_str_us,
+                   loc=glm_pot_loc_us,
+                   host=glm_pot_host_us)
+  
+
+```
+
+### Conditional Expectations
+
+Here we create the data for producing conditional expectation charts.  This involves creating a set of basket or exemplar scoring properties to use as the permutations of conditions.
+
+```{r}
+
+# Create New variables
+
+ str_tdf$gpb <- str_tdf$max_guests / str_tdf$bedrooms
+ str_tdf$canc <- ifelse(str_tdf$canc_policy == 'Flexible', 1, 0)
+
+# Recreate Model 
+  
+ pred_model <- glm(pot_pref ~ type + as.factor(bedbath) + as.factor(geo_mrkt) +
+                    gpb + min_stay + canc,
+                      family=binomial(link='logit'),
+                      data=str_tdf)
+  
+
+### Create variables for pred 
+
+  bedbath <- unique(str_tdf$bedbath)
+  type <- unique(str_tdf$type)
+  geo_mrkt <- unique(str_tdf$geo_mrkt)
+  canc <- c(0,1)
+  min_stay <- c(1,2,3,4,7)
+  gpb <- 1:5
+  
+  pred_df <- expand.grid(bedbath, type, geo_mrkt, canc, min_stay, gpb)
+  names(pred_df) <- c('bedbath', 'type', 'geo_mrkt', 'canc', 'min_stay', 'gpb')
+  
+  pred_df$id <- apply(pred_df, 1, function(x) paste0(substr(x['type'], 1,1),
+                                                     x['bedbath'], 
+                                                     substr(x['geo_mrkt'], 1, 5)))
+  
+  str_tdf$id <- apply(str_tdf, 1, function(x) paste0(substr(x['type'], 1,1),
+                                                     x['bedbath'], 
+                                                     substr(x['geo_mrkt'], 1, 5)))
+  pred_df$aid <- apply(pred_df, 1, function(x) paste0(x['bedbath'], 
+                                                      substr(x['geo_mrkt'], 1, 5)))
+  str_tdf$aid <- apply(str_tdf, 1, function(x) paste0(x['bedbath'], 
+                                                      substr(x['geo_mrkt'], 1, 5)))
+  
+```
+
+We then make the predictions over all of the exemplar properties
+
+```{r}
+
+# Make predictions
+  pred_df$raw <- predict(pred_model, newdata = pred_df)
+  pred_df$prob <-  exp(pred_df$raw)/(1+exp(pred_df$raw))
+  pred_df$sh <- ifelse(pred_df$prob > .5, 1, 0)
+  pred_df$sh <- factor(pred_df$sh, levels = c(1,0))
+  
+  pred_df$gpb <- as.factor(pred_df$gpb)
+  pred_df$cc <- ifelse(pred_df$canc == 1, 'Flexible', 'Strict')
+  pred_df$ct <- paste0(ifelse(pred_df$type == 'House', 'House', 'Apt'), 
+                       " - ",  pred_df$cc)
+
+  pred_df$ms <- as.character(pred_df$min_stay)
+  pred_df$ms[pred_df$ms == '4'] <- '4-6'
+  pred_df$ms[pred_df$ms == '7'] <- '7+'
+  pred_df$ms <- factor(pred_df$ms, levels=c('1', '2', '3', '4-6', '7+'))
+  
+  pred_df$sm <- as.character(pred_df$geo_mrkt)
+  pred_df$sm[pred_df$sm == 'city-core'] <- 'City-Core'
+  pred_df$sm[pred_df$sm == 'city'] <- 'City'
+  pred_df$sm[pred_df$sm == 'beach'] <- 'Beach'
+  pred_df$sm[pred_df$sm == 'suburban'] <- 'Suburban'
+  pred_df$sm <- factor(pred_df$sm, levels = c('City-Core', 'City', 'Beach', 'Suburban'))
+
+  pred_df$ct <- factor(pred_df$ct, levels = c('Apt - Strict', 'House - Strict', 
+                                              'Apt - Flexible', 'House - Flexible'))
+    
+```
+
+We save these outputs for use in the data visualization stage next.  
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  dir.create(file.path(getwd(), 'data', 'analyzed'))
+  save(str_tdf, ltr_tdf, ltr_df, col_df, suburb_sf, studyarea_sf, sa1_sf, str_sf, ltr_sf,
+       pot_glms, core_suburbs, str_tdf_all, pot_mc_glms, pot_us_glms,
+       pred_df, 
+       file=file.path(getwd(), 'data', 'analyzed', 'analyzed_data.RData'))
+  
+```

@@ -1,0 +1,1067 @@
+---
+title: "Script 3: Data Preparation, Integration and Cleaning"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+  knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+
+```
+
+## Introduction
+
+This file details the initial data preparation and cleaning that we have applied to the AirBNB nightly data from www.AirDNA.co as well as to the long-term rental data from Australia Property Monitors (APM).  Both datasets have had some initial pre-processing done, the details of which are found in **1_str_preprocessing.RMD** and **2_ltr_preprocessing.RMD**. 
+
+&nbsp;
+&nbsp;
+
+## Preliminary Commands
+
+&nbsp;
+
+We begin with a number of preliminary commands.  First we load all of the necessary R libraries for this analysis. 
+
+```{r load_libraries, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+
+  library(tidyverse)
+  library(sf)
+  library(multidplyr) # Note you have to install from the github site hadley/multidplyr
+  library(tmap)
+
+```
+
+```{r saf}
+
+  options(stringsAsFactors=FALSE)
+
+```
+
+Next, we source the necessary custom code files for the analysis.  
+
+```{r source_files, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+
+  source(file.path(getwd(), 'functions', 'abb_Functions.R'))
+
+```
+
+## Constants and Parameters
+
+We then set the constants used in this study:
+ 
+1. **Exchange rate**: The Airbnb rates are provided in US dollars.  We convert these to Australian dollars based on the average exchange rate over the Sep 1 2015 to Aug 30 2015 period, or about 1.32 Australian dollars to 1 US dollar.
+ 
+```{r set_constants, message=FALSE, warning=FALSE, comment=FALSE, echo=TRUE, results='hide'}
+ 
+  exch_rate <- 1.32  
+
+```
+
+2. **Date of Purchase**: In our analyzis we assume a date on which the decision to Airbnb or to enter into a long-term rental strategy is undertaken.  We set this to September 1, 2015. 
+
+```{r set_date}
+  
+  decision_date <- lubridate::as_date('2015-09-01')
+  
+```
+
+3. Colors for visualizations.  We use the official Airbnb palette of colors for our ongoing data vizualizations. 
+
+```{r set_colors, message=FALSE, warning=FALSE, comment=FALSE, echo=FALSE}
+ 
+ # Set all colors
+  col_df <- data.frame(names=c('rausch', 'hackberry', 'kazan', 'babu', 'lima', 
+                               'beach', 'ebisu', 'tirol', 'foggy', 'hof'),
+                       rgb = c(rgb(250, 88, 99, maxColorValue=255), 
+                               rgb(139, 14, 82, maxColorValue=255),
+                               rgb(0, 117, 140, maxColorValue=255), 
+                               rgb(4, 211, 191, maxColorValue=255),
+                               rgb(77, 226, 110, maxColorValue=255), 
+                               rgb(252, 179, 14, maxColorValue=255),
+                               rgb(249, 177, 139, maxColorValue=255), 
+                               rgb(191, 166, 100, maxColorValue=255),
+                               rgb(156, 161, 155, maxColorValue=255), 
+                               rgb(86, 94, 97, maxColorValue=255)))
+
+ # Set specific colors
+  str_col <- col_df$rgb[1]
+  ltr_col <- col_df$rgb[3]
+  sm_cols <- col_df$rgb[c(2, 4, 5, 8, 6)]
+
+```
+
+## Loading data
+
+&nbsp;
+
+Next we load in the raw data from the previous pre-processing activities. 
+
+```{r load_str_data, message=FALSE, warning=FALSE, comment=FALSE}
+
+  str_tdf <- readRDS(file.path(getwd(), 'data', 'prepared', 'str_data.RDS'))
+
+  ltr_tdf <- readRDS(file.path(getwd(), 'data', 'prepared', 'ltr_data.RDS'))
+
+```
+ 
+Then we load three GIS shapefiles.  The first two denote suburb and Statistical Area 1 (sa1) boundaries in the Melbourne area. We also load a shapefile that contains the location of the beach areas along Port Phillip Bay.^[Only those east of the mouth of Yarra River as those to the west are primarily industrial land.]  
+
+```{r load_sp_data, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  suburb_sf <- sf::st_read(file.path(getwd(), 'data', 'geographic', 'melbSuburbs.shp')) %>%
+    st_transform(crs=4283)
+  sa1_sf <- sf::st_read(file.path(getwd(), 'data', 'geographic', 'sa1s.shp')) %>%
+    st_transform(crs=4283)
+  beach_sf <- sf::st_read(file.path(getwd(), 'data', 'geographic','portPhillipBeach_saclip.shp')) %>%
+    st_transform(crs=4283)
+  
+
+```
+ 
+## Data Preparation
+ 
+&nbsp;
+ 
+In this section we remove, convert and/or transform a number of data fields. We also remove observations if they are missing critical data or fall outside of the scope of our research question. 
+
+### Trim by Time
+ 
+We begin by filtering the observations by time.  Our hypothetical simulated decision is that of an investor who purchases a property on September 1, 2015 and must decide on traditional long term rental versus an AirBNB, short term rental approach to generating income.  To determine the likely long term rental rate for any given property, we will use the observed rental transactions from the market from September 1, 2014 to August 31, 2015.  Taking the AirBNB approach allows the owner to change rates over time and is subjected to daily changes in the market (supply and demand factors).  In this simulated example we will use AirBnB data from September 1, 2015 to August 31, 2016 to represent the actual AirBNB market conditions over the time period in question.  Another reason for using these two period of data is that the AirBNB data has missing daily values prior to September 1, 2015.  While we have imputed these missing daily observations, we hold the actual observed values to be of greater accuracy and have designed the initial simulated example to take advantage of the full observed set. 
+ 
+Before we begin the filter process, we initial the data cleaning counter -- a small function that keeps track of how many observations we remove.  
+
+```{r initialCC, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+   clean_obj <- setCleanCount()
+
+```
+
+We then clip by time.  For the short-term data we will consider any Airbnb property that had at least 6 months worth of listing time on the portal during the 12-month study period.  We also filter the long term data to include only observations with one year prior to the decision date. 
+ 
+```{r clip_time, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+  
+  # Limit short term data
+   
+  # Trim properties by min and max date
+  str_tdf <- str_tdf %>%
+    dplyr::filter((max_date - min_date) >= 178) %>%
+    dplyr::filter((max_date >= (decision_date + 182) &
+                    min_date <= (decision_date + 182)))
+
+  # Trim actual nightly observation by the decision date
+  str_tdf <- str_tdf %>% 
+     mutate(daily_data = map(daily_data, ~filter(., date >= decision_date)))
+
+  # Limit long term data
+  ltr_tdf <- ltr_tdf %>% 
+     mutate(trans_data = map(trans_data, ~filter(., (date <= decision_date - 1) & 
+                                                     date >= decision_date - 365)))
+ # Count cleaning
+
+  clean_obj <- countCleaning(clean_obj, 'time')
+
+```
+ 
+Next we add a monthly variable to the data for use in future modeling exercises. 
+ 
+```{r add_month, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  # Short term data
+  str_tdf <- str_tdf %>% 
+     mutate(daily_data = map(daily_data, 
+                             ~mutate(., month = paste0(lubridate::year(date), "_",
+                                                       lubridate::month(date)))))
+  # Long term data
+  ltr_tdf <- ltr_tdf %>% 
+     mutate(trans_data = map(trans_data, 
+                             ~mutate(., month = paste0(lubridate::year(date), "_",
+                                                       lubridate::month(date)))))
+  
+```
+
+### Standardize Property Types
+
+&nbsp;
+
+AirBNB units are classified into 19 different property type.  The most common are Apartments and Houses, the least common are Igloo, Tent, Treehouse and Yurt^[Property types are owner/lister defined, therfore it is likely that the Igloo, at the very least, is not a completely true representation of the property type]. For the sake of this analysis, we will collapse these twenty types into three types:
+
+1. **House**:  Includes properties labeled 'House', 'Townhouse' or 'Villa'
+2. **Apartment**: Includes properties labeled as 'Apartment' or 'Condominium'
+3. **Other**: Includes properties labeled as 'Bed & Breakfast', 'Boat', 'Bungalow', 'Cabin', 'Camper/RV', 'Chalet', 'Dorm', 'Earth House', 'Hut', 'Igloo', 'Loft', 'Other', 'Tent', 'Treehouse' and 'Yurt.
+
+Within the long-term rental data, property types fall into eight categories.  Like the AirBNB data we group these into three categories matching as best as possible to the AirBNB categories:
+
+1. **House**:  Includes properties labeled 'Duplex', 'House', 'Terrace', 'Townhouse' or 'Villa'
+2. **Apartment**: Includes properties labeled as 'Unit' or 'Studio'
+3. **Other**: Includes properties labeled as 'Semi'
+
+Part of the difficulty in perfectly mapping property types from these two datasets is due to the fact that the long-term data uses Australian terms while the AirBNB data conforms to North American lexicon.  This is most apparent when talking about apartment dwellings.  In Australia these are referred to as Units, while in North American they are referred to as Apartments or Condominiums (depending on ownership structure).  Additionally, Terrace homes are very common in many of the older suburbs of Melbourne and would be considered Rowhouses or, likely, Townhomes in the North American context. 
+ 
+We then create a new variable in each dataset and give each one of the three categories discussed above.
+ 
+```{r fix_type, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  # Short Term data  
+  str_tdf <- str_tdf %>%
+    dplyr::mutate(type = 'Other')
+  str_tdf$type[str_tdf$property_type %in% 
+               c('Apartment', 'Condominium', 'Loft')] <- 'Apartment'
+  str_tdf$type[str_tdf$property_type %in% c('House', 'Townhouse', 'Villa')] <- 'House'
+ 
+  # Long Term data  
+  ltr_tdf <- ltr_tdf %>%
+    dplyr::mutate(type = 'Other')
+  ltr_tdf$type[ltr_tdf$property_type %in% c('Duplex', 'House',
+                                             'Terrace', 'Townhouse', 'Villa')] <- 'House'
+  ltr_tdf$type[ltr_tdf$property_type %in% c('Studio', 'Unit')] <- 'Apartment'
+ 
+```
+ 
+As the chart below show, the **Other** category only makes up a very small percentage of the properties in both the short and long term market, especially in the long-term market.  Additionally, a good portion of the **Others** in the Airbnb data are Bed & Breakfast units, a use which doesn't fit with our research question.  As a result, we remove the 'Others' from both the Airbnb and the long term rental data. 
+ 
+```{r plot_str_type, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=4}
+
+   ggplot(str_tdf, aes(x=type)) + 
+     geom_bar(color=str_col, fill=str_col) +
+     xlab('\nProperty Type\n') + 
+     ggtitle('\nShort Term Rentals\n')  +
+     ylab('# of Properties\n') +
+     theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+
+```{r plot_ltr_type, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=4}
+
+  ggplot(ltr_tdf, aes(x=type)) +
+    geom_bar(color=ltr_col, fill=ltr_col) +
+    xlab('\nProperty Type\n') +
+    ggtitle('\nLong Term Rentals\n')  +
+    ylab('# of Properties\n') +
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r remove_others, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=4}
+
+   str_tdf <- str_tdf %>% dplyr::filter(type != 'Other')
+   ltr_tdf <- ltr_tdf %>% dplyr::filter(type != 'Other')
+
+   # Count 
+   clean_obj <- countCleaning(clean_obj, 'property_type')
+
+```
+
+Next, for the short term rentals properties can be listed as one of three types relating to the extent of the property which is able to be booked:
+ 
+1. **Entire Home/Apt**: The entire home or apartment is available
+2. **Private Room**: One room within a house or apartment is available
+3. **Shared Room**: A bed within a room shared by another occupant(s) is available
+ 
+As long-term rentals do not offer **Private Room** or **Shared Room** options^[Our dataset does not include rooming houses, purpose built student accomodations and other types of rental which may offer private or shared room options] and our purpose here is a comparison of long and short term returnw, we remove all short term properties that do not lease the entire home/apt. Unfortunately, this filter does remove about 40% of the short term data, however, given the research question it is unavoidable. 
+ 
+```{r ltype_comp, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=4}
+ 
+   # Fix data types and names
+   str_tdf <- str_tdf %>%
+     dplyr::mutate(listing_type = as.character(listing_type),
+                   listing_type = if_else(listing_type == 'Entire home/apt', 
+                                          'Entire home', listing_type)) 
+
+   # Plot by listing type
+   ggplot(str_tdf, aes(x=listing_type)) + 
+      geom_bar(color=str_col, fill=str_col) +
+      xlab('\nListing Type\n') +
+      ggtitle('\nShort Term Rentals by Listing Type\n')  +
+      ylab('# of Properties\n') +
+     theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r keep_entire_home, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  str_tdf <- str_tdf %>% 
+    dplyr::filter(listing_type == 'Entire home')
+
+  # Count cleaning
+  clean_obj <- countCleaning(clean_obj, 'listing_type')
+
+```
+ 
+ 
+### Host types
+
+Finally, we test to see if grouping by hosts types has any impact.  
+
+First we must divide hosts up.  We start by looking at block rate.  
+    
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  ggplot(str_tdf, aes(x=block_rate)) + 
+    geom_density(fill=str_col, color=str_col) +
+    ylab('Frequency\n') + 
+    xlab('\n% of Time Property is Blocked') +
+    scale_x_continuous(breaks=seq(0,1,.2),
+                       labels=c('0%', '20%', '40%', '60%', '80%', '100%')) +
+      ggtitle('Host Block Rate Frequency\n') +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      theme(axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+
+```
+
+We then add the number of blocked periods
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  ggplot(str_tdf, aes(x=block_rate, y=nbr_block * (366/total_days))) + 
+    geom_point(fill=str_col, color=str_col, size=.2) +
+    ylab('Nbr of Blocked Periods\n') + 
+    xlab('\n% of Time Property is Blocked') +
+    scale_x_continuous(breaks=seq(0, 1, .2),
+                       labels=c('0%', '20%', '40%', '60%', '80%', '100%')) +
+    ggtitle('Block Rate vs. Nbr. of Blocked Periods\n') +
+    theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+
+No real pattern emerges, so we divide manually. 
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  str_tdf$blockpertime <- round(str_tdf$nbr_block * (366 / str_tdf$total_days), 1)
+
+  str_tdf$host_type <- 'Unknown'
+  str_tdf$host_type[str_tdf$block_rate <= .25] <- 'Profit Seeker'
+  str_tdf$host_type[str_tdf$block_rate >= .75] <- 'Opportunistic Sharer'
+  str_tdf$host_type <- factor(str_tdf$host_type,
+                              levels=c('Profit Seeker', 'Opportunistic Sharer', 
+                                       'Unknown'))
+
+ ggplot(str_tdf, 
+       aes(x=block_rate, y=blockpertime, color=host_type)) + 
+  geom_point(alpha=.5, size=.8, shape=16) +
+  ylab('Number of Blocked Periods\n') + 
+  xlab('\n% of Time Property is Blocked') +
+      ggtitle('Block Rate vs. Nbr. of Blocked Periods\n') +
+ 
+    scale_x_continuous(breaks=seq(0, 1, .2),
+                     labels=c('0%', '20%', '40%', '60%', '80%', '100%')) +
+    scale_color_manual(values=c(col_df$rgb[2], col_df$rgb[4], col_df$rgb[7])) + 
+    theme(legend.position='bottom',
+           legend.title = element_blank(),
+         plot.title = element_text(hjust = 0.5))+
+     guides(colour = guide_legend(override.aes = list(size=3,
+                                                     alpha=1)))
+ 
+ str_tdf_all <- str_tdf
+ str_tdf <- str_tdf %>% dplyr::filter(host_type == 'Profit Seeker')
+
+``` 
+ 
+ 
+## Structural Characteristics
+ 
+&nbsp;
+ 
+In this section we transform and filter based on the structural characteristics of the properties. 
+ 
+### Bedrooms
+ 
+We start by looking at bedrooms. We begin by removing all properties that are missing bedrooms information or have a likely data error in this fields (more than 10 bedrooms). We then plot the distribution of different bedrooms counts.  From this point onwards we bifurcate our analysis between houses and apartments as the markets (prices, rates, and properties) differ between the two property types. 
+ 
+```{r bed_fltr, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+   # Long term data
+   ltr_tdf <- ltr_tdf %>%
+     dplyr::filter(!is.na(bedrooms)) %>%
+     dplyr::filter(bedrooms <= 10)
+ 
+   # Short term data
+   str_tdf <- str_tdf %>%
+     dplyr::filter(!is.na(bedrooms)) %>%
+     dplyr::filter(bedrooms <= 10)
+ 
+```
+ 
+```{r plot_ltr_bed, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=5}
+
+   ggplot(ltr_tdf, aes(x=bedrooms)) + 
+     geom_bar(fill=ltr_col, color=ltr_col) +
+     facet_wrap(~type,scales='free_y') +
+     scale_x_continuous(labels=1:10, breaks=1:10)+
+     xlab('\nBedrooms\n') +
+     scale_y_continuous(labels=c(0,10000,20000), 
+                        breaks=c(0,10000,20000))+
+     ylab('') +
+     ggtitle('Bedrooms in Long Term Rentals') +
+     theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+
+```{r plot_str_bed, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=5}
+
+   ggplot(str_tdf, aes(x=bedrooms)) + 
+     geom_bar(fill=str_col, color=str_col) +
+     facet_wrap(~type,scales='free_y') +
+     scale_x_continuous(labels=0:10, breaks=0:10) +
+     xlab('\nBedrooms\n') +
+     ylab('') +
+     ggtitle('Bedrooms in Short Term Rentals') +
+     theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+ 
+For both short and long term rentals we see that most apartments have less than 4 bedrooms and houses less than 5.  We filter the data accordingly. Additionally, note that short term rentals consider studio apartments to be 0 bed units while the long term data considers these as 1 bedroom. We convert the 0 bed short term units to 1 bed units.   
+ 
+```{r bed_fltr3, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  # Remove all with more than 4 beds for house, 3 beds for apt 
+  str_tdf <- str_tdf %>% 
+    dplyr::filter(bedrooms < 5) %>%
+    dplyr::filter(type == 'House' | (type == 'Apartment' & bedrooms < 4)) 
+  ltr_df <- ltr_tdf %>% 
+    dplyr::filter(bedrooms < 5) %>%
+    dplyr::filter(type == 'House' | (type == 'Apartment' & bedrooms < 4))
+   
+  # Convert any studio to 1 bedrooms
+  str_tdf$bedrooms <- ifelse(str_tdf$bedrooms == 0, 1L, str_tdf$bedrooms)
+  ltr_tdf$bedrooms  <- ifelse(ltr_tdf$bedrooms == 0, 1, ltr_tdf$bedrooms)
+  
+  # Count Data Cleaning
+    clean_obj <- countCleaning(clean_obj, 'bedrooms')
+ 
+```
+ 
+### Bathrooms
+ 
+We then turn to bathrooms, starting by looking at the distribution of baths between short/long and apt/house.  
+ 
+```{r bath_fltr, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  if ('baths' %in% names(ltr_tdf)) ltr_tdf <- ltr_tdf %>% rename(bathrooms = baths)
+
+  ltr_tdf <- ltr_tdf %>%
+    dplyr::filter(!is.na(bathrooms))
+
+  str_tdf <- str_tdf %>% 
+    dplyr::filter(!is.na(bathrooms))
+
+```
+ 
+```{r plot_ltr_bath, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=5}
+ 
+   ggplot(ltr_tdf, aes(x=bathrooms)) + 
+     geom_bar(fill=ltr_col, color=ltr_col) +
+     facet_wrap(~type) +
+     scale_x_continuous(labels=1:8, breaks=1:8)+
+     xlab('\nBathrooms\n') +
+     ylab('') +
+     ggtitle('Bathrooms in Long Term Rentals') +
+     theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r plot_str_bath, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=5}
+  
+  ggplot(str_tdf, aes(x=bathrooms)) +
+    geom_bar(fill=str_col, color=str_col) +
+    facet_wrap(~type, scales='free_y') +
+    scale_x_continuous(labels=0:8, breaks=0:8)+
+    xlab('\nBathrooms\n') +
+    ylab('') +
+    ggtitle('Bathrooms in Short Term ltrals') +
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+ 
+Here we see that nearly all properties have 3 or fewer bathrooms and we filter the data accordingly. A few short term properties state no baths, which is likely an error so we remove these as well. Also, here we notice that the short term data gives bathrooms in halves, while the long term data presents baths in whole numbers.  We round the baths up to whole integers. 
+ 
+```{r bath_fltr3, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  str_tdf <- str_tdf %>%
+    dplyr::mutate(bathrooms = round(bathrooms + .01, 0)) %>%
+    dplyr::filter(bathrooms < 4 & bathrooms > 0) 
+
+  ltr_tdf <- ltr_tdf %>%
+    dplyr::filter(bathrooms < 4 & bathrooms > 0)
+
+   # Count cleaning
+  clean_obj <- countCleaning(clean_obj, 'baths')
+   
+```
+ 
+### Bed/Bath Combination
+ 
+In addition to looking at bedrooms and bathrooms as separate dimensions of properties, they can also be considered together.  In other words, it is very common in the industry (and when looking for a short term rental) to specify searches by bed/bath combination for obvious reasons -- 1 bedroom with 3 baths is inefficient and 4 bedrooms with 1 bath is uncomfortable.  As a result we examine the combinations of the two. 
+ 
+```{r filtBB, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  str_tdf <- str_tdf %>% 
+    dplyr::mutate(bedbath = paste0(bedrooms, "_", bathrooms))
+
+  ltr_tdf <- ltr_tdf %>% 
+    dplyr::mutate(bedbath = paste0(bedrooms, "_", bathrooms))
+
+```
+
+```{r plot_ltr_bb, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=5}
+
+  ggplot(ltr_tdf, aes(x=bedbath)) +
+    geom_bar(fill=ltr_col, color=ltr_col) +
+    xlab('\nBed/Bath Combo\n') +
+    ylab('Number of Properties\n') +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    ggtitle('Long Term Rentals') +
+    facet_wrap(~type, scales='free_y')+
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r plot_str_bb, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE, fig.height=5}
+
+  ggplot(str_tdf, aes(x=bedbath)) +
+    geom_bar(fill=str_col, color=str_col) +
+    xlab('\nBed/Bath Combo\n') +
+    ylab('Number of Properties\n') +
+    ggtitle('Short Term Rentals') +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    facet_wrap(~type, scales='free_y')+
+    theme(plot.title = element_text(hjust = 0.5))
+
+```
+ 
+From this analysis we see that there are 6 combinations that make up most all properties:  1bed/1bath, 2/1, 2/2, 3/1, 3/2, 3/3, 4/2 and 4/3. We filter the data to these combinations.  We also combine type and bed bath combination to create a 'product'. 
+ 
+```{r filtBB3, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+ # Set level of acceptable combinations
+
+  acc_bb <- c('1_1', '2_1', '2_2', '3_1', '3_2', '3_3', '4_2', '4_3')
+
+ # Filter data
+  str_tdf <- str_tdf %>%
+    dplyr::filter(bedbath %in% acc_bb) %>%
+    dplyr::mutate(product = paste0(substr(type, 1, 1), "_", bedbath))
+  
+  ltr_tdf <- ltr_tdf %>%
+    dplyr::filter(bedbath %in% acc_bb) %>%
+    dplyr::mutate(product = paste0(substr(type, 1, 1), "_", bedbath))
+
+ # Count Cleaning
+  clean_obj <- countCleaning(clean_obj, 'bedbath')
+
+```
+
+#### Host Policies
+ 
+Here we combine the two Strict (regular and super) cancellation policies into one as there are few 'super' strict and this is used as a factor in future modeling.  We also remove the few observations with missing host policy data
+ 
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  str_tdf <- str_tdf %>%
+    dplyr::mutate(canc_policy = ifelse(canc_policy == 'Super Strict 60 Days',
+                                         'Strict', canc_policy)) %>%
+    dplyr::filter(canc_policy %in% c('Flexible', 'Moderate', 'Strict'))
+
+  # Count Cleaning
+  clean_obj <- countCleaning(clean_obj, 'hostpolicy')
+
+```
+
+Next, a small number of properties have very long minimum stays, we round any minimum stay greater than 7 days to be 7 days.
+
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  str_tdf <- str_tdf %>%
+   dplyr::mutate(min_stay = if_else(min_stay > 7L, 7L, min_stay))
+
+  str_tdf <- str_tdf %>%
+   dplyr::mutate(guest_per_bed = round(max_guests / bedrooms, 2)) %>%
+   dplyr::mutate(guest_per_bed = if_else(guest_per_bed > 4, 4, guest_per_bed))
+
+```
+
+### Locations and Submarkets
+ 
+Location is clearly an important determinant in both the short and long term rental markets. At the broadest scale, the long-term Melbourne residential market is usually discussed in terms of Inner, Middle and Outer suburbs.  In general, prices are highest in the inner suburbs and lowest in the outer, with a number of exceptions in the high end neighborhoods in the east and southeastern areas of the middle suburbs.  Suburbs in Melbourne are much smaller than their North American counterparts.  The specific suburb of a property is the second, or finer scale, at which the market operates. The plot below shows the three large submarkets (Inner, Middle and Outer).
+ 
+```{r mappoints2, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  # Set colors
+  tm_shape(suburb_sf) +
+    tm_polygons('suburbDesi',
+                title='Suburb Designation',
+                border.col='white',
+                palette=c('gray10', 'gray40', 'gray70'))
+    
+```
+# 
+It is likely that the short-term rental market follows a similar market hierarchy, however, we can imagine that a few different spatial features can influence the short-term market.  While there are many possible additional features, we consider two to be the most likely to influence rates or occupancy: 1) Proximity to beach; and 2) Proximity to key tourist activities and events.  Using the three broad submarkets from the long-term market (inner, middle and outer) we have created a five sub-market system as a starting point for spatially analysing short and long term ltrals in Melboure:
+
+1. Rural (Outer suburbs, not Beach)
+2. Suburban (Middle suburbs, not Beach)
+3. City (Inner Suburbs, not Beach, not Core)
+4. City-Core (Select inner suburbs with tourist activities and near CBD)
+5. Beach (Properties within 500m of Port Phillip Bay east of Yarra River)
+
+We assign these designations by: 1) Adding suburb designations to the properties; 2) Assigning submarkets 1-4 based on suburb location; and 3) Indicating proximity to beach and labeling as 'Beach' submarket.  This process is repeated for both the short and long term data.  We also add the Statistical Area 1 code for each property for use in additional spatial modeling later on. Finally, we also remove any observations that fall outside of outer suburbs (the extent of the suburbs).
+
+We select the 18 suburbs below to represent the 'core' of the city.  The majority of tourist destinations and major events such as the Australian Open and the Grand Prix are located in these suburbs.  All are well serviced by public transportation and possess abundant amenties for tourists.
+
+```{r core_suburbs, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  core_suburbs <- c('Albert Park', 'Carlton', 'Collingwood', 'Cremorne', 'Docklands',
+                    'East Melbourne', 'Fitzroy', 'Melbourne', 'Port Melbourne', 'Prahran',
+                    'Richmond', 'South Melbourne', 'South Yarra', 'Southbank', 'St Kilda',
+                    'St Kilda West', 'West Melbourne', 'Windsor')
+ 
+```
+ 
+We then apply a 500 meter buffer to the beach along Port Phillip Bay. 
+ 
+```{r beachbuffer, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  # Determine centroid of study area
+  
+   lat_mid <- median(str_tdf$latitude)
+   long_mid <- median(str_tdf$longitude)
+ 
+ # Calculate Degress to Meters conversion 
+  
+   m_lat = 111132.954 - 559.822 * cos(2 * lat_mid) + 1.175 * cos(4 * lat_mid)
+   m_long = 111132.954 * cos (lat_mid)
+   m_conv <- mean(c(m_lat, m_long))
+  
+  # Create the beach buffer  
+   
+  suppressWarnings(beach_buffer <- st_buffer(beach_sf, dist =(500 / m_conv)))
+ 
+```
+
+Next we assign the suburb, SA1, city-core and beach designations to observations in the Airbnb dataset.  
+ 
+```{r add_st_space, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+
+  # Convert to point sf data
+   str_sf <- st_as_sf(str_tdf %>% 
+                        dplyr::select(property_id, longitude, latitude),
+                      coords = c('longitude', 'latitude'),
+                      crs = 4283)
+
+   ltr_sf <- st_as_sf(ltr_tdf %>% 
+                        dplyr::select(addr_id, longitude, latitude) %>%
+                        dplyr::filter(!is.na(latitude)),
+                      coords = c('longitude', 'latitude'),
+                      crs = 4283)
+
+  # Add suburb designation and remove those that are outside   
+   str_sf <- st_join(str_sf, 
+                     suburb_sf %>% 
+                      dplyr::select(suburb = NAME_2006,
+                                    sub_des = suburbDesi,
+                                    geometry)) %>%
+   dplyr::filter(!is.na(sub_des) & sub_des != 'Outer')
+    
+   ltr_sf <- st_join(ltr_sf, 
+                     suburb_sf %>% 
+                       dplyr::select(suburb = NAME_2006,
+                                     sub_des = suburbDesi,
+                                     geometry)) %>%
+   dplyr::filter(!is.na(sub_des) & sub_des != 'Outer')
+  
+```
+
+Determine which suburbs are represented in both datasets and trim to those observations to suburbs with at least three transactions
+
+```{r match_suburbs, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+    # Count those with at least 3 transactions
+    sub_str <- str_sf %>% 
+      dplyr::select(suburb, -geometry) %>% 
+      as.tibble() %>%
+      dplyr::group_by(suburb) %>% 
+      dplyr::summarize(count=n()) %>%
+      dplyr::filter(count >= 3 & 
+                      suburb != 'Maddingley')
+    
+    sub_ltr <- ltr_sf %>% 
+      dplyr::select(suburb, -geometry) %>% 
+      as.tibble() %>%
+      dplyr::group_by(suburb) %>% 
+      dplyr::summarize(count=n()) %>%
+      dplyr::filter(count >= 3 & 
+                      suburb != 'Maddingley')
+
+    # Join to create unified list
+    sub_all <- sub_ltr %>%
+      dplyr::inner_join(sub_str, by='suburb')
+    
+    # Remove those with insufficient observations
+    str_sf <- str_sf %>%
+      dplyr::filter(suburb %in% sub_all$suburb)
+    
+    ltr_sf <- ltr_sf %>%
+      dplyr::filter(suburb %in% sub_all$suburb)
+    
+```
+
+Create a polygon of the new study area
+
+```{r new_study_area, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  # Get ids of study suburbs
+  sa_ids <- suburb_sf %>%
+    dplyr::filter(NAME_2006 %in% sub_all$suburb) %>%
+    sf::st_union() %>%
+    sf::st_convex_hull() %>%
+    sf::st_buffer(., .001) %>%
+    st_contains(., suburb_sf$geometry) %>%
+    unlist()
+  
+  # Study Area
+  studyarea <- suburb_sf %>% 
+    slice(sa_ids) %>%
+    st_union()
+  studyarea_sf <- st_sf(name='studyarea', geometry=studyarea)
+  
+  plot(studyarea_sf$geometry)
+  
+  # Create Indicators in main sf fle
+  suburb_sf <- suburb_sf %>%
+    dplyr::select(name = NAME_2006, class = suburbDesi, geometry) %>%
+    dplyr::mutate(in_study = if_else(name %in% sub_all$suburb, 1, 0),
+                  in_studyarea = 0)
+  suburb_sf$in_studyarea[sa_ids] <- 1
+  
+```
+
+Next we add the sa1 and beach designations
+
+```{r add_sa1_beach, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  # Add SA1
+    str_sf <- st_join(str_sf, 
+                       sa1_sf %>%
+                         dplyr::select(sa1=SA1_MAIN11,
+                                       geometry)) %>%
+    dplyr::filter(!is.na(sa1))
+    
+    ltr_sf <- st_join(ltr_sf, 
+                       sa1_sf %>%
+                         dplyr::select(sa1=SA1_MAIN11,
+                                       geometry)) %>%
+    dplyr::filter(!is.na(sa1))
+
+  # Add Beach
+   str_sf <- st_join(str_sf, 
+                       beach_buffer %>%
+                         dplyr::select(beach=id,
+                                       geometry)) %>%
+             dplyr::mutate(beach = ifelse(is.na(beach), 0, beach))
+      
+   ltr_sf <- st_join(ltr_sf, 
+                       beach_buffer %>%
+                         dplyr::select(beach=id,
+                                       geometry)) %>%
+             dplyr::mutate(beach = ifelse(is.na(beach), 0, beach))
+    
+```
+ 
+Add market designations. 
+ 
+```{r convert_st_subm, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  ## Add to STR
+ 
+   # Add individual classes
+   str_sf$geo_mrkt <- 'suburban'
+   str_sf$geo_mrkt[str_sf$sub_des == 'Inner'] <- 'city'
+   str_sf$geo_mrkt[str_sf$suburb %in% core_suburbs] <- 'city-core'
+   str_sf$geo_mrkt[str_sf$beach == 1] <- 'beach'
+   
+   # Order the factors properly
+   str_sf$geo_mrkt <- factor(str_sf$geo_mrkt,
+                               levels=c('city-core', 'city', 'suburban', 'beach'))
+   
+   ## Add to LTR  
+     
+   # Add individual classes
+   ltr_sf$geo_mrkt <- 'suburban'
+   ltr_sf$geo_mrkt[ltr_sf$sub_des == 'Inner'] <- 'city'
+   ltr_sf$geo_mrkt[ltr_sf$suburb %in% core_suburbs] <- 'city-core'
+   ltr_sf$geo_mrkt[ltr_sf$beach == 1] <- 'beach'
+   
+   # Order the factors properly
+   ltr_sf$geo_mrkt <- factor(ltr_sf$geo_mrkt,
+                               levels=c('city-core', 'city', 'suburban', 'beach'))
+   
+```
+ 
+Finally we add the spatial data back onto the tabular data and filtering out those outside of the study area using an inner join. We then have to remove the geometry field as it causes issues with future analyses (for now).
+
+```{r merge_spatial, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+  str_tdf <- str_tdf %>%
+    dplyr::inner_join(str_sf, 
+                      by='property_id') %>% 
+     dplyr::mutate(geometry = NULL) %>%
+     as.tibble()
+
+  ltr_tdf <- ltr_tdf %>%
+    dplyr::inner_join(ltr_sf,
+                      by='addr_id') %>% 
+     dplyr::mutate(geometry = NULL) %>%
+     as.tibble()
+  
+   # Count Cleaning
+  clean_obj <- countCleaning(clean_obj, 'location')
+
+```
+
+## Rates and Rental values
+ 
+We now turn to filtering by the prices -- the nightly rates and weekly rental values.  We start by removing observations missing price data. 
+ 
+```{r ltprice_fltr, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  ltr_tdf <- ltr_tdf %>% 
+     mutate(trans_data = map(trans_data, ~filter(., !is.na(price)))) %>%
+     filter(map(trans_data, ~nrow(.)) > 0)
+
+  str_tdf <- str_tdf %>% 
+     mutate(daily_data = map(daily_data, ~filter(., !is.na(price)))) %>%
+     filter(map(daily_data, ~nrow(.)) > 0) %>%
+     filter(!is.na(nightly_rate))
+
+```
+ 
+Next, we convert the Airbnb values to Australian dollars from US dollars using the exchange rate specified above (1.32).
+ 
+```{r exch_rate_adj, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  # Property level data
+  str_tdf <- str_tdf %>%
+    dplyr::mutate_at(vars(monthly_rate, weekly_rate, nightly_rate, 
+                          avg_nightly_rate, cleaning_fee), 
+                     .funs=function(x) x*exch_rate)
+
+  # Nightly Data
+  str_tdf <- str_tdf %>%
+    mutate(daily_data = map(daily_data, ~mutate(., price = price * exch_rate)))
+
+```
+ 
+Next we extract all of the daily reservation data for the reserved nightly. From this information we calculate the median nightly reservation price for each property and append it to the property level data. 
+ 
+```{r ltprice_fltr3, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+   # Custom function
+   medReserved <- function(x){
+     median(x$price[x$status == 'R'])
+   }
+ 
+   str_tdf <- str_tdf %>%
+     dplyr::mutate(med_rate = unlist(map(daily_data, ~medReserved(.)))) %>%
+     dplyr::filter(!is.na(med_rate))
+   
+```
+ 
+From these density plots we see that most long-term Rentals are greater than $200 and less than $1000 per week while most nightly rates are greater than $50 and less than $500 per night. We filter the data accordingly. 
+ 
+```{r ltprice_fltr2, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+  # ltr Plot
+
+  ggplot(ltr_tdf %>% tidyr::unnest(), aes(x=price)) +
+    geom_density(fill=ltr_col, alpha=.8) +
+    ylab('') +
+    xlab('Weekly Rental') +
+    ggtitle('Long Term Rentals') +
+    scale_x_continuous(limits=c(0, 1500)) +
+    theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank()) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+
+  # Nightly Rate plot
+  ggplot(str_tdf, aes(x=med_rate)) +
+    geom_density(fill=str_col, alpha=.8) +
+    ylab('') +
+    xlab('Nightly Rate') +
+    ggtitle('Short Term Rentals') +
+    scale_x_continuous(limits=c(0, 600)) +
+    theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank()) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+ 
+```{r ltprice_fltr33s, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+ 
+   ## Filter the long term data
+  ltr_tdf <- ltr_tdf %>% 
+     mutate(trans_data = map(trans_data, ~filter(., price >= 200 &
+                                                   price <= 1000))) %>%
+     filter(map(trans_data, ~nrow(.)) > 0)
+  
+  str_tdf <- str_tdf %>% 
+    filter(., med_rate >= 50 & med_rate <= 500)
+  
+   # Count Cleaning
+  clean_obj <- countCleaning(clean_obj, 'rates_rents')
+   
+```  
+ 
+#### Observed Revenue
+ 
+Our final data filtering considers the observed revenue of the properties. For the long-term rentals the observed revenue is the weekly rate multiplied by 52 minus the number of weeks the property was on the market.  In a number of extreme cases, time on market was extremely long and the total observed revenues very low. To remove these outlying observations, we filter out any properties with less than $5,000 in revenue.
+
+```{r ltr_rev}
+
+   ltr_tdf <- ltr_tdf %>%
+     dplyr::mutate(trans_data = map(trans_data, 
+                                    ~mutate(., 
+                                            gross_revenue = price * (52 - dom / 7)))) %>%
+     dplyr::mutate(trans_data = map(trans_data, 
+                                    ~filter(., gross_revenue >= 5000)))
+  
+```
+
+For the short-term data, we first calculate the total number of bookings, the occupancy rate, blocked rate and proportion of the year over which the property was listed.  Using this data we sum up the total revenue from bookings. 
+ 
+ For properties that were not listed on the site for the entire year, we impute their annual revenue by dividing the actual revenue by the proportion of the year in which they were listed.^[Properties listed in summer, but not winter may be over imputed and vice versa, however, we expect the biases to cancel out over the entire sample.] Properties with no reserved bookings, and, therefore, no revenue, are removed.
+ 
+Looking at the distribution of the revenues from each tenure type, we see that those for the long-term rentals are for more consistent, with the vast majority totaling between \$12,000 to \$30,000 per year.  Short term revenues range from neglible to highs of greater than \$80,000.  While this simple analysis does not control for location and product differences, it does highlight the fact that some Airbnb owners are likely making greater revenues than in long-term rentals, but that most are likely not. Also, the high number of very low yield Airbnb properties also suggests that some owners may not be focused on maximizing revenue, but instead prefer the flexibility of short-term leasing.
+ 
+```{r obs_bookings, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE}
+ 
+   # Compute bookings count and str revenue
+   countBookings <- function(x){
+     length(which(x$status == 'R'))
+   } 
+
+   str_tdf <- str_tdf %>%
+     mutate(bookings = unlist(map(daily_data, ~countBookings(.))),
+            occ_rate = bookings / 366,
+            revenue = bookings * med_rate)
+
+```
+
+Next we impute the likely bookings for properties which were not listed on the portal for the entire year.
+
+```{r lik_bookings, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE}
+
+  # Create daily rate summary
+  rate_summ <- str_tdf %>% 
+   dplyr::select(property_id, daily_data) %>%
+    tidyr::unnest() %>%
+    dplyr::filter(status != 'B') %>%
+    dplyr::group_by(date) %>%
+    dplyr::summarize(rate = length(which(status == 'R')) / n(),
+                     obs = n())
+
+  # Create new cluster
+  abb_cl <- get_default_cluster() 
+
+  # Register function and variable
+  cluster_copy(abb_cl, impLikelyBookings)
+  cluster_copy(abb_cl, rate_summ)
+  cluster_library(abb_cl, c("magrittr", 'dplyr', 'tidyr'))
+
+  # Summarize daily by property
+  lik_book_df <- str_tdf %>%
+    dplyr::filter(total_days != 366) %>%
+    multidplyr::partition(property_id, cluster = abb_cl) %>% 
+    dplyr::do(impLikelyBookings(., rate_summ = rate_summ)) %>% 
+    dplyr::collect()
+
+  # Add to the existing data
+  str_tdf <- str_tdf %>%
+    left_join(lik_book_df, by='property_id') %>%
+    dplyr::mutate(lik_bookings = if_else(is.na(lik_bookings), 
+                                         bookings, 
+                                         as.integer(lik_bookings)),
+                  lik_occ_rate = lik_bookings / 366)
+
+```
+
+Finally, we compute the potential bookings, assuming that blocked periods were rented at the same rate as the non-block, controlling for dates and property specific performance on non-blocked dates. 
+
+```{r pot_bookings, message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE}
+
+    # Create new cluster
+  abb_cl <- get_default_cluster() 
+
+  # Register function and variable
+  cluster_copy(abb_cl, impPotentialBookings)
+  cluster_copy(abb_cl, rate_summ)
+  cluster_library(abb_cl, c("magrittr", 'dplyr', 'tidyr'))
+
+  # Summarize daily by property
+  pot_book_df <- str_tdf %>%
+    dplyr::filter(block_rate > 0) %>%
+    multidplyr::partition(property_id, cluster = abb_cl) %>% 
+    dplyr::do(impPotentialBookings(., rate_summ = rate_summ)) %>% 
+    dplyr::collect()
+
+  # Add to the existing data
+  str_tdf <- str_tdf %>%
+    left_join(pot_book_df, by='property_id') %>%
+    dplyr::mutate(pot_bookings = if_else(is.na(pot_bookings), 
+                                         bookings, 
+                                         as.integer(pot_bookings)),
+                  pot_bookings = if_else(pot_bookings > 366L, 366L, pot_bookings),
+                  pot_occ_rate = pot_bookings / 366)
+
+```
+
+### Calculating Net Revenues
+
+We begin the analysis by calculating the net revenues for the short term data.  We calculate three types of net revenues, Actual, Likely (Extrapolated) and Potential. The differences are described more fully in the writeup.
+
+Before we start, we estimate two figures necessary to determine utility costs: 1) Costs per person per day (cpppd) and the average number of guests per bedroom. The State of Victoria gives energy costs at \$330 (apartment) to \$520 (house).  For 2 persons in an apartment that works out to \$5 per person per day.  For a house of 4 persons that works out to about \$4 per person per day. We use a mid point value of \$4.50 per person per day.  We use an estimate of 1.5 persons per bedroom in each unit.
+
+```{r utility_estimates, message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  # Set cost per person per day
+  cpppd <- 4.5
+
+  # Calculate avg number of guests
+  str_tdf$avg_guests <- str_tdf$bedrooms * 1.5
+
+```
+
+We then calculate the actual net revenue by multiplying booking times median rate - utility costs.  
+
+```{r act_revenues, message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  str_tdf$revenue_net <- ((str_tdf$bookings * str_tdf$med_rate) -
+                             (str_tdf$bookings * str_tdf$avg_guests * cpppd))
+
+```
+
+Then we create Potential Revenue, by imputing occupancy rates and revenues for blocked periods. 
+
+```{r pot_revenues, message=FALSE, warning=FALSE, comment=FALSE, cache=TRUE, echo=TRUE}
+
+  str_tdf$pot_revenue_net <- ((str_tdf$pot_bookings * str_tdf$med_rate) -
+                                (str_tdf$pot_bookings * str_tdf$avg_guests * cpppd))
+
+```
+
+## Write out data  
+ 
+```{r message=FALSE, warning=FALSE, comment=FALSE, cache=FALSE, echo=TRUE}
+
+   save(str_tdf, ltr_tdf, str_sf, ltr_sf, studyarea_sf, suburb_sf, beach_sf, sa1_sf,
+        col_df, clean_obj, core_suburbs, str_tdf_all, beach_buffer,
+        file=paste0(file.path(getwd(), 'data', 'prepared', 'prepared_data.RData')))
+ 
+```
